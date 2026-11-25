@@ -8,10 +8,11 @@ using Resolve=void *(*)(const Key *);
 static std::atomic<SetRTPC> originalSet{nullptr};
 static std::atomic<Resolve> originalResolve{nullptr};
 static NativeMotion::OriginalCapabilities capabilities;
+static NativeMotion::OriginalMotionActionRelay actionRelay;
 static void **managerCell;
 static bool installed=false,attempted=false;
 static thread_local unsigned ownWrites=0;
-static std::atomic<uint64_t> redirects{0},observedGameWrites{0};
+static std::atomic<uint64_t> redirects{0},preservedRoutes{0},observedGameWrites{0};
 static constexpr uint32_t observedEvents[]={
     0x0c2baa48,0x26860fe2,0x6697ee02,0x6e94fdad,0x916bd377,0xf8481152
 };
@@ -30,6 +31,7 @@ static int Set(uint32_t id,float value,uint64_t owner,int time,int curve,bool by
     }
     return result;
 }
+static int ExecuteAction(void *action,void *pending){return actionRelay.execute(action,pending);}
 static void *Output(const Key *key){
     void *result=originalResolve.load(std::memory_order_acquire)(key);
     void *device=PrivateOutputProbe::nativeDevice.load(std::memory_order_acquire);
@@ -37,7 +39,7 @@ static void *Output(const Key *key){
     bool motion=NativeMotion::HasOriginalMotionRoot(key->bus,
         [](const void *bus){return ReadAt<uint32_t>(bus,0x10);},
         [](const void *bus){return ReadAt<const void *>(bus,0x90);});
-    if(!motion)return result;
+    if(!motion){++preservedRoutes;return result;}
     ++redirects;return device;
 }
 static void CaptureOnRender(){
@@ -75,12 +77,14 @@ static bool Install(){
     }
     const uint32_t setPrefix[]={0x6dbb23e9,0xa9015ff8,0xa90257f6,0xa9034ff4};
     const uint32_t resolvePrefix[]={0xa9be4ff4,0xa9017bfd,0x910043fd,0xf9400009};
-    if(!NativeCodePatch::Install(F<void *>(0x1108df6bc),(void *)Set,setPrefix,originalSet)||
+    const uint32_t actionPrefix[]={0xd10783ff,0xa91b57f6,0xa91c4ff4,0xa91d7bfd};
+    if(!NativeCodePatch::Install(F<void *>(0x1108d9684),(void *)ExecuteAction,actionPrefix,actionRelay.original)||
+       !NativeCodePatch::Install(F<void *>(0x1108df6bc),(void *)Set,setPrefix,originalSet)||
        !NativeCodePatch::Install(F<void *>(0x1109224b8),(void *)Output,resolvePrefix,originalResolve)){
         W(@"original_motion installed=0 reason=hook_profile");return false;
     }
     installed=true;PrivateOutputProbe::observeRender=CaptureOnRender;
-    W(@"original_motion installed=1 existing_ios_vorbis_aux=1 primary_audio_route_unchanged=1 capture=existing_private_output");
+    W(@"original_motion installed=1 existing_ios_vorbis_aux=1 master_bus_route=1 bow_duplicate_action_guard=1 bow_guard_entries=2 primary_audio_route_unchanged=1 capture=existing_private_output");
     return true;
 }
 static void Request(bool enabled){capabilities.request(installed&&enabled);}
@@ -102,8 +106,9 @@ static void ObserveEvent(uint32_t event){
 }
 static void Status(){
     if(!installed)return;
-    W(@"original_motion status snapshot_ready=%d active=%d native_bus_resolves=%llu game_gate_writes=%llu",
-        capabilities.ready(),capabilities.active(),redirects.load(),observedGameWrites.load());
+    W(@"original_motion status snapshot_ready=%d active=%d native_bus_resolves=%llu preserved_output_resolves=%llu bow_actions_suppressed=%llu bow_primary_suppressed=%llu bow_alternate_suppressed=%llu game_gate_writes=%llu",
+        capabilities.ready(),capabilities.active(),redirects.load(),preservedRoutes.load(),actionRelay.suppressed.load(),
+        actionRelay.suppressedPrimary.load(),actionRelay.suppressedAlternate.load(),observedGameWrites.load());
     static uint64_t last[6]{};
     for(unsigned i=0;i<6;++i){
         uint64_t count=eventCounts[i].load();if(count==last[i])continue;last[i]=count;

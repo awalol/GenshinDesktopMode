@@ -70,6 +70,8 @@ public:
     }
 };
 
+// The renderer resolves the master bus after combining auxiliary sends.
+// Filtering this lookup by child IDs discards those sends as well.
 template<class Bus,class ReadID,class ReadParent>
 bool HasOriginalMotionRoot(const Bus *bus,ReadID id,ReadParent parent){
     for(unsigned depth=0;bus&&depth<64;++depth){
@@ -78,6 +80,37 @@ bool HasOriginalMotionRoot(const Bus *bus,ReadID id,ReadParent parent){
     }
     return false;
 }
+
+// Suppress the two redundant iOS bow-charge actions before they enter the
+// shared mixer. Private events 0xed000d2a and 0xed000bad both play 0xed00086d;
+// their native counterparts both play 0x310b53b2 with identical action data.
+// Match the action ID, target and type together so ordinary sound, auxiliary
+// sends, stop actions and remapped private actions retain their native path.
+struct OriginalMotionActionRelay {
+    using Execute=int (*)(void *,void *);
+    using Ready=bool (*)();
+    std::atomic<Execute> original{nullptr};
+    std::atomic<Ready> replacementReady{nullptr};
+    std::atomic<uint64_t> suppressed{0};
+    std::atomic<uint64_t> suppressedPrimary{0},suppressedAlternate{0};
+    int execute(void *action,void *pending){
+        if(action){
+            uint32_t id,target;uint16_t type;
+            memcpy(&id,(const char *)action+0x10,4);
+            memcpy(&target,(const char *)action+0x30,4);
+            memcpy(&type,(const char *)action+0x34,2);
+            auto ready=replacementReady.load(std::memory_order_acquire);
+            if((id==0x2ce9920d||id==0x2948cffc)&&target==0x310b53b2&&type==0x0403&&ready&&ready()){
+                ++suppressed;
+                if(id==0x2ce9920d)++suppressedPrimary;else ++suppressedAlternate;
+                // AK_Success, also used by the native action's chance-to-play
+                // rejection path. No voice was started, so no stop is needed.
+                return 1;
+            }
+        }
+        return original.load(std::memory_order_acquire)(action,pending);
+    }
+};
 
 // SetRTPCValue's checked ARM64 body loads the audio queue through ADRP x24 at
 // +0x30 and LDR x0,[x24,#imm] at +0x44. The SDK's RTPC-manager cell is +0x38

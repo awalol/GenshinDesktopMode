@@ -8,6 +8,7 @@
 #include "live_event_map.h"
 #include "native_code_patch.h"
 #include "native_original_motion.h"
+
 namespace NativeLive {
 using Dispatch=NativeMotion::ImmediateDispatcher<>;
 static NativeMotion::SDKRelay relay;
@@ -108,6 +109,11 @@ static bool InstallRelay(){
     auto s=NativeCodePatch::Install(F<void *>(0x1108e1254),(void *)SDKStop,stopPrefix,relay.originalStop);
     if(!s)return false;
     engineRelay.observe=Observe;relay.observeStop=ObserveStop;
+    #if GDM_NATIVE_PRODUCT
+    NativeOriginalMotion::actionRelay.replacementReady=[](){
+        return ready.load()&&allowed.load()&&capabilities.active()&&NativeOriginalMotion::capabilities.active();
+    };
+    #endif
     W(@"native_live event_entry=shared_native_postevent sdk_and_direct_callers=1 private_posts_excluded=1 preserve_emitter_command_order=1 timer_starts_no_events=1");
     return true;
 }
